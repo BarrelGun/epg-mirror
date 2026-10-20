@@ -4,7 +4,7 @@ on:
   schedule:
     # Запуск каждые 8 часов
     - cron: '0 */8 * * *'
-  workflow_dispatch: # Позволяет запускать обновление вручную кнопкой
+  workflow_dispatch: # Позволяет запускать обновление вручную
 
 jobs:
   update:
@@ -25,11 +25,25 @@ jobs:
           git add epg.xml.gz edem.xml.gz
           git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update EPG: $(date +'%Y-%m-%d %H:%M')" && git push)
 
-      - name: Upload to Yandex Disk via WebDAV
+      - name: Setup Rclone & Upload to Yandex Disk
         env:
           YANDEX_USER: ${{ secrets.YANDEX_USER }}
           YANDEX_PASS: ${{ secrets.YANDEX_PASS }}
         run: |
-          # Загрузка файлов в корень Яндекс.Диска по WebDAV
-          curl -s -S -X PUT -u "$YANDEX_USER:$YANDEX_PASS" --data-binary @"epg.xml.gz" "https://webdav.yandex.ru/epg.xml.gz"
-          curl -s -S -X PUT -u "$YANDEX_USER:$YANDEX_PASS" --data-binary @"edem.xml.gz" "https://webdav.yandex.ru/edem.xml.gz"
+          # Устанавливаем rclone
+          sudo apt-get update && sudo apt-get install -y rclone
+
+          # Создаем временный конфиг для подключения к Яндекс.Диску по WebDAV
+          mkdir -p ~/.config/rclone
+          cat <<EOF > ~/.config/rclone/rclone.conf
+          [yandex]
+          type = webdav
+          url = https://webdav.yandex.ru
+          vendor = rclone
+          user = $YANDEX_USER
+          pass = $(rclone obscure "$YANDEX_PASS")
+          EOF
+
+          # Загружаем файлы в папку epg на Яндекс.Диске с оптимизацией и тайм-аутом
+          rclone copy epg.xml.gz yandex:/epg/ --timeout 3m --retries 3 --low-level-retries 5
+          rclone copy edem.xml.gz yandex:/epg/ --timeout 3m --retries 3 --low-level-retries 5
