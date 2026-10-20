@@ -1,0 +1,26 @@
+name: Update EPG
+
+on:
+  schedule:
+    # Запуск каждые 12 часов
+    - cron: '0 */12 * * *'
+  workflow_dispatch: # Позволяет запускать обновление вручную
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download EPG files
+        run: |
+          curl -L "https://iptvx.one/epg/epg.xml.gz" -o epg.xml.gz
+          curl -L "http://epg.one/edem.xml.gz" -o edem.xml.gz
+
+      - name: Commit and push if changed
+        run: |
+          git config --global user.name "EPG Bot"
+          git config --global user.email "bot@users.noreply.github.com"
+          git add epg.xml.gz edem.xml.gz
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update EPG: $(date +'%Y-%m-%d %H:%M')" && git push)
