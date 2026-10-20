@@ -2,9 +2,8 @@ name: Update EPG
 
 on:
   schedule:
-    # Запуск каждые 8 часов
     - cron: '0 */8 * * *'
-  workflow_dispatch: # Позволяет запускать обновление вручную
+  workflow_dispatch:
 
 jobs:
   update:
@@ -13,10 +12,38 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download EPG files
+      - name: Check file sizes and download if changed
         run: |
-          curl -L "https://iptvx.one/epg/epg.xml.gz" -o epg.xml.gz
-          curl -L "http://epg.one/edem.xml.gz" -o edem.xml.gz
+          REMOTE_SIZE_1=$(curl -sI "https://iptvx.one/epg/epg.xml.gz" | grep -i "Content-Length" | awk '{print $2}' | tr -d '\r')
+          LOCAL_SIZE_1=$(stat -c%s "epg.xml.gz" 2>/dev/null || echo 0)
+
+          echo "EPG 1 - Remote: $REMOTE_SIZE_1, Local: $LOCAL_SIZE_1"
+
+          DOWNLOAD_1=false
+          if [ "$REMOTE_SIZE_1" != "$LOCAL_SIZE_1" ] || [ "$REMOTE_SIZE_1" = "" ]; then
+            echo "EPG 1 changed or size unknown. Downloading..."
+            curl -L --max-time 120 "https://iptvx.one/epg/epg.xml.gz" -o epg.xml.gz
+            DOWNLOAD_1=true
+          else
+            echo "EPG 1 size is identical. Skipping download."
+          fi
+
+          REMOTE_SIZE_2=$(curl -sI "http://epg.one/edem.xml.gz" | grep -i "Content-Length" | awk '{print $2}' | tr -d '\r')
+          LOCAL_SIZE_2=$(stat -c%s "edem.xml.gz" 2>/dev/null || echo 0)
+
+          echo "EPG 2 - Remote: $REMOTE_SIZE_2, Local: $LOCAL_SIZE_2"
+
+          DOWNLOAD_2=false
+          if [ "$REMOTE_SIZE_2" != "$LOCAL_SIZE_2" ] || [ "$REMOTE_SIZE_2" = "" ]; then
+            echo "EPG 2 changed or size unknown. Downloading..."
+            curl -L --max-time 120 "http://epg.one/edem.xml.gz" -o edem.xml.gz
+            DOWNLOAD_2=true
+          else
+            echo "EPG 2 size is identical. Skipping download."
+          fi
+
+          echo "download_1=$DOWNLOAD_1" >> $GITHUB_ENV
+          echo "download_2=$DOWNLOAD_2" >> $GITHUB_ENV
 
       - name: Commit and push to GitHub
         run: |
@@ -25,25 +52,25 @@ jobs:
           git add epg.xml.gz edem.xml.gz
           git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update EPG: $(date +'%Y-%m-%d %H:%M')" && git push)
 
-      - name: Setup Rclone & Upload to Yandex Disk
+      - name: Upload to Yandex Disk via WebDAV
         env:
           YANDEX_USER: ${{ secrets.YANDEX_USER }}
           YANDEX_PASS: ${{ secrets.YANDEX_PASS }}
         run: |
-          # Устанавливаем rclone
-          sudo apt-get update && sudo apt-get install -y rclone
+          # Убедимся, что папка epg создана на WebDAV (если она уже есть, команда просто проигнорирует ошибку)
+          curl -s -X MKCOL -u "$YANDEX_USER:$YANDEX_PASS" "https://webdav.yandex.ru/epg" || true
 
-          # Создаем временный конфиг для подключения к Яндекс.Диску по WebDAV
-          mkdir -p ~/.config/rclone
-          cat <<EOF > ~/.config/rclone/rclone.conf
-          [yandex]
-          type = webdav
-          url = https://webdav.yandex.ru
-          vendor = rclone
-          user = $YANDEX_USER
-          pass = $(rclone obscure "$YANDEX_PASS")
-          EOF
+          # Загружаем файлы на Яндекс.Диск в папку epg с ограничением по времени и выводом прогресса
+          if [ "${{ env.download_1 }}" = "true" ]; then
+            echo "Uploading epg.xml.gz to Yandex Disk..."
+            curl -s -S --max-time 300 -T epg.xml.gz -u "$YANDEX_USER:$YANDEX_PASS" "https://webdav.yandex.ru/epg/epg.xml.gz"
+          else
+            echo "EPG 1 not changed, skipping Yandex upload."
+          fi
 
-          # Загружаем файлы в папку epg на Яндекс.Диске с оптимизацией и тайм-аутом
-          rclone copy epg.xml.gz yandex:/epg/ --timeout 3m --retries 3 --low-level-retries 5
-          rclone copy edem.xml.gz yandex:/epg/ --timeout 3m --retries 3 --low-level-retries 5
+          if [ "${{ env.download_2 }}" = "true" ]; then
+            echo "Uploading edem.xml.gz to Yandex Disk..."
+            curl -s -S --max-time 300 -T edem.xml.gz -u "$YANDEX_USER:$YANDEX_PASS" "https://webdav.yandex.ru/epg/edem.xml.gz"
+          else
+            echo "EPG 2 not changed, skipping Yandex upload."
+          fi
