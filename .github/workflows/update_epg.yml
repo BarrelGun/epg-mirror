@@ -52,25 +52,41 @@ jobs:
           git add epg.xml.gz edem.xml.gz
           git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update EPG: $(date +'%Y-%m-%d %H:%M')" && git push)
 
-      - name: Upload to Yandex Disk via WebDAV
+      - name: Upload to Yandex Disk via REST API
         env:
-          YANDEX_USER: ${{ secrets.YANDEX_USER }}
           YANDEX_PASS: ${{ secrets.YANDEX_PASS }}
         run: |
-          # Убедимся, что папка epg создана на WebDAV (если она уже есть, команда просто проигнорирует ошибку)
-          curl -s -X MKCOL -u "$YANDEX_USER:$YANDEX_PASS" "https://webdav.yandex.ru/epg" || true
+          # Функция для загрузки файла через Яндекс.Диск API (использует пароль приложения как OAuth-токен)
+          upload_to_yandex() {
+            local FILE_NAME=$1
+            local REMOTE_PATH="epg/$FILE_NAME"
+            
+            echo "Getting upload URL for $FILE_NAME..."
+            # Запрашиваем у Яндекса временную ссылку для загрузки файла
+            HREF=$(curl -s -H "Authorization: OAuth $YANDEX_PASS" \
+              "https://cloud-api.yandex.net/v1/disk/resources/upload?path=$REMOTE_PATH&overwrite=true" \
+              | grep -o '"href":"[^"]*' | grep -o 'https://[^"]*')
+            
+            if [ -z "$HREF" ]; then
+              echo "Error: Failed to get upload URL from Yandex API"
+              exit 1
+            fi
 
-          # Загружаем файлы на Яндекс.Диск в папку epg с ограничением по времени и выводом прогресса
+            echo "Uploading $FILE_NAME via API..."
+            # Загружаем файл по полученной временной ссылке
+            curl -s -S --max-time 300 -T "$FILE_NAME" "$HREF"
+            echo "Successfully uploaded $FILE_NAME!"
+          }
+
+          # Загружаем файлы на Яндекс.Диск только если они обновились
           if [ "${{ env.download_1 }}" = "true" ]; then
-            echo "Uploading epg.xml.gz to Yandex Disk..."
-            curl -s -S --max-time 300 -T epg.xml.gz -u "$YANDEX_USER:$YANDEX_PASS" "https://webdav.yandex.ru/epg/epg.xml.gz"
+            upload_to_yandex "epg.xml.gz"
           else
             echo "EPG 1 not changed, skipping Yandex upload."
           fi
 
           if [ "${{ env.download_2 }}" = "true" ]; then
-            echo "Uploading edem.xml.gz to Yandex Disk..."
-            curl -s -S --max-time 300 -T edem.xml.gz -u "$YANDEX_USER:$YANDEX_PASS" "https://webdav.yandex.ru/epg/edem.xml.gz"
+            upload_to_yandex "edem.xml.gz"
           else
             echo "EPG 2 not changed, skipping Yandex upload."
           fi
