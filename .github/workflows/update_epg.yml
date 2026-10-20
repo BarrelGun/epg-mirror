@@ -19,11 +19,9 @@ jobs:
 
           echo "EPG 1 - Remote: $REMOTE_SIZE_1, Local: $LOCAL_SIZE_1"
 
-          DOWNLOAD_1=false
           if [ "$REMOTE_SIZE_1" != "$LOCAL_SIZE_1" ] || [ "$REMOTE_SIZE_1" = "" ]; then
-            echo "EPG 1 changed or size unknown. Downloading..."
-            curl -L --max-time 120 "https://iptvx.one/epg/epg.xml.gz" -o epg.xml.gz
-            DOWNLOAD_1=true
+            echo "EPG 1 changed. Downloading..."
+            curl -L "https://iptvx.one/epg/epg.xml.gz" -o epg.xml.gz
           else
             echo "EPG 1 size is identical. Skipping download."
           fi
@@ -33,17 +31,12 @@ jobs:
 
           echo "EPG 2 - Remote: $REMOTE_SIZE_2, Local: $LOCAL_SIZE_2"
 
-          DOWNLOAD_2=false
           if [ "$REMOTE_SIZE_2" != "$LOCAL_SIZE_2" ] || [ "$REMOTE_SIZE_2" = "" ]; then
-            echo "EPG 2 changed or size unknown. Downloading..."
-            curl -L --max-time 120 "http://epg.one/edem.xml.gz" -o edem.xml.gz
-            DOWNLOAD_2=true
+            echo "EPG 2 changed. Downloading..."
+            curl -L "http://epg.one/edem.xml.gz" -o edem.xml.gz
           else
             echo "EPG 2 size is identical. Skipping download."
           fi
-
-          echo "download_1=$DOWNLOAD_1" >> $GITHUB_ENV
-          echo "download_2=$DOWNLOAD_2" >> $GITHUB_ENV
 
       - name: Commit and push to GitHub
         run: |
@@ -51,42 +44,3 @@ jobs:
           git config --global user.email "bot@users.noreply.github.com"
           git add epg.xml.gz edem.xml.gz
           git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update EPG: $(date +'%Y-%m-%d %H:%M')" && git push)
-
-      - name: Upload to Yandex Disk via REST API
-        env:
-          YANDEX_PASS: ${{ secrets.YANDEX_PASS }}
-        run: |
-          # Функция для загрузки файла через Яндекс.Диск API (использует пароль приложения как OAuth-токен)
-          upload_to_yandex() {
-            local FILE_NAME=$1
-            local REMOTE_PATH="epg/$FILE_NAME"
-            
-            echo "Getting upload URL for $FILE_NAME..."
-            # Запрашиваем у Яндекса временную ссылку для загрузки файла
-            HREF=$(curl -s -H "Authorization: OAuth $YANDEX_PASS" \
-              "https://cloud-api.yandex.net/v1/disk/resources/upload?path=$REMOTE_PATH&overwrite=true" \
-              | grep -o '"href":"[^"]*' | grep -o 'https://[^"]*')
-            
-            if [ -z "$HREF" ]; then
-              echo "Error: Failed to get upload URL from Yandex API"
-              exit 1
-            fi
-
-            echo "Uploading $FILE_NAME via API..."
-            # Загружаем файл по полученной временной ссылке
-            curl -s -S --max-time 300 -T "$FILE_NAME" "$HREF"
-            echo "Successfully uploaded $FILE_NAME!"
-          }
-
-          # Загружаем файлы на Яндекс.Диск только если они обновились
-          if [ "${{ env.download_1 }}" = "true" ]; then
-            upload_to_yandex "epg.xml.gz"
-          else
-            echo "EPG 1 not changed, skipping Yandex upload."
-          fi
-
-          if [ "${{ env.download_2 }}" = "true" ]; then
-            upload_to_yandex "edem.xml.gz"
-          else
-            echo "EPG 2 not changed, skipping Yandex upload."
-          fi
