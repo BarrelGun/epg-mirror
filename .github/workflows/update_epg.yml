@@ -12,7 +12,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1 # Скачивает только последний срез, экономя время и трафик
+          fetch-depth: 1
 
       - name: Check file sizes and download if changed
         run: |
@@ -21,9 +21,11 @@ jobs:
 
           echo "EPG 1 - Remote: $REMOTE_SIZE_1, Local: $LOCAL_SIZE_1"
 
+          DOWNLOAD_1=false
           if [ "$REMOTE_SIZE_1" != "$LOCAL_SIZE_1" ] || [ "$REMOTE_SIZE_1" = "" ]; then
             echo "EPG 1 changed. Downloading..."
             curl -L "https://iptvx.one/epg/epg.xml.gz" -o epg.xml.gz
+            DOWNLOAD_1=true
           else
             echo "EPG 1 size is identical. Skipping download."
           fi
@@ -33,16 +35,60 @@ jobs:
 
           echo "EPG 2 - Remote: $REMOTE_SIZE_2, Local: $LOCAL_SIZE_2"
 
+          DOWNLOAD_2=false
           if [ "$REMOTE_SIZE_2" != "$LOCAL_SIZE_2" ] || [ "$REMOTE_SIZE_2" = "" ]; then
             echo "EPG 2 changed. Downloading..."
             curl -L "http://epg.one/edem.xml.gz" -o edem.xml.gz
+            DOWNLOAD_2=true
           else
             echo "EPG 2 size is identical. Skipping download."
           fi
 
-      - name: Commit and push to GitHub
+          echo "download_1=$DOWNLOAD_1" >> $GITHUB_ENV
+          echo "download_2=$DOWNLOAD_2" >> $GITHUB_ENV
+
+      - name: Commit and push to GitHub (code history)
         run: |
           git config --global user.name "EPG Bot"
           git config --global user.email "bot@users.noreply.github.com"
           git add epg.xml.gz edem.xml.gz
           git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update EPG: $(date +'%Y-%m-%d %H:%M')" && git push)
+
+      - name: Upload to Hugging Face Datasets
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          # Устанавливаем Python-клиент для работы с Hugging Face
+          pip install -U huggingface_hub
+
+          # Запускаем питоновский скрипт для загрузки только обновленных файлов
+          python - << 'EOF'
+          import os
+          from huggingface_hub import HfApi
+
+          token = os.environ.get("HF_TOKEN")
+          repo_id = "BarrelGun/epg-mirror" # Замени на свой repo_id, если имя на HF отличается
+          api = HfApi(token=token)
+
+          if os.environ.get("download_1") == "true":
+              print("Uploading epg.xml.gz to Hugging Face...")
+              api.upload_file(
+                  path_or_fileobj="epg.xml.gz",
+                  path_in_repo="epg.xml.gz",
+                  repo_id=repo_id,
+                  repo_type="dataset",
+              )
+          else:
+              print("EPG 1 not changed, skipping HF upload.")
+
+          if os.environ.get("download_2") == "true":
+              print("Uploading edem.xml.gz to Hugging Face...")
+              api.upload_file(
+                  path_or_fileobj="edem.xml.gz",
+                  path_in_repo="edem.xml.gz",
+                  repo_id=repo_id,
+                  repo_type="dataset",
+              )
+          else:
+              print("EPG 2 not changed, skipping HF upload.")
+          EOF
