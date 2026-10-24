@@ -2,8 +2,8 @@ name: Update EPG Mirror
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
-  workflow_dispatch:
+    - cron: '0 */6 * * *' # Автозапуск каждые 6 часов
+  workflow_dispatch: # Ручной запуск из интерфейса GitHub
 
 jobs:
   update-epg:
@@ -12,32 +12,52 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download EPG 1 (epg.xml.gz)
+      - name: Check and download EPG 1 (epg.xml.gz)
+        id: check_epg1
         run: |
-          echo "Downloading epg.xml.gz..."
-          curl -s -O https://iptvx.one/epg/epg.xml.gz
           NEW_LEN=$(curl -sI https://iptvx.one/epg/epg.xml.gz | grep -i Content-Length | awk '{print $2}' | tr -d '\r')
-          echo "$NEW_LEN" > epg1_len.txt
+          OLD_LEN=""
+          [ -f epg1_len.txt ] && OLD_LEN=$(cat epg1_len.txt)
+          
+          if [ -n "$NEW_LEN" ] && [ "$NEW_LEN" != "$OLD_LEN" ]; then
+            echo "EPG1 changed ($OLD_LEN -> $NEW_LEN). Downloading..."
+            curl -s -O https://iptvx.one/epg/epg.xml.gz
+            echo "$NEW_LEN" > epg1_len.txt
+            echo "EPG1_CHANGED=true" >> $GITHUB_ENV
+          else
+            echo "EPG1 not changed."
+            echo "EPG1_CHANGED=false" >> $GITHUB_ENV
+          fi
 
-      - name: Download EPG 2 (edem.xml.gz)
+      - name: Check and download EPG 2 (edem.xml.gz)
+        id: check_epg2
         run: |
-          echo "Downloading edem.xml.gz..."
-          curl -s -O https://epg.one/edem.xml.gz
           NEW_LEN=$(curl -sI https://epg.one/edem.xml.gz | grep -i Content-Length | awk '{print $2}' | tr -d '\r')
-          echo "$NEW_LEN" > epg2_len.txt
+          OLD_LEN=""
+          [ -f epg2_len.txt ] && OLD_LEN=$(cat epg2_len.txt)
+          
+          if [ -n "$NEW_LEN" ] && [ "$NEW_LEN" != "$OLD_LEN" ]; then
+            echo "EPG2 changed ($OLD_LEN -> $NEW_LEN). Downloading..."
+            curl -s -O https://epg.one/edem.xml.gz
+            echo "$NEW_LEN" > epg2_len.txt
+            echo "EPG2_CHANGED=true" >> $GITHUB_ENV
+          else
+            echo "EPG2 not changed."
+            echo "EPG2_CHANGED=false" >> $GITHUB_ENV
+          fi
 
       - name: Upload files to GitLab Generic Packages
         env:
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
         run: |
-          if [ -f epg.xml.gz ]; then
+          if [ "$EPG1_CHANGED" = "true" ] && [ -f epg.xml.gz ]; then
             echo "Uploading epg.xml.gz to GitLab..."
             curl -f --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
                  --upload-file epg.xml.gz \
                  "https://gitlab.com/api/v4/projects/BarrelGun%2Fepg-mirror/packages/generic/epg/1.0.0/epg.xml.gz"
           fi
 
-          if [ -f edem.xml.gz ]; then
+          if [ "$EPG2_CHANGED" = "true" ] && [ -f edem.xml.gz ]; then
             echo "Uploading edem.xml.gz to GitLab..."
             curl -f --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
                  --upload-file edem.xml.gz \
@@ -48,6 +68,7 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
+          git checkout -- .
           git add epg1_len.txt epg2_len.txt
           git diff --quiet && git diff --staged --quiet || git commit -m "Update EPG metadata [skip ci]"
           git push
