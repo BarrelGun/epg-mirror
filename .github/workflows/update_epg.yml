@@ -2,8 +2,8 @@ name: Update EPG Mirror
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # Автозапуск каждые 6 часов
-  workflow_dispatch: # Ручной запуск из интерфейса GitHub
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
 
 jobs:
   update-epg:
@@ -50,11 +50,17 @@ jobs:
         env:
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
         run: |
-          # Если хотя бы один файл изменился, удаляем старый пакет целиком, чтобы избежать дублирования
           if [ "$EPG1_CHANGED" = "true" ] || [ "$EPG2_CHANGED" = "true" ]; then
-            echo "Cleaning up old package version on GitLab..."
-            curl --request DELETE --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
-                 "https://gitlab.com/api/v4/projects/BarrelGun%2Fepg-mirror/packages/generic/epg/1.0.0" || true
+            echo "Finding existing package ID on GitLab..."
+            PKG_ID=$(curl -s --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+              "https://gitlab.com/api/v4/projects/BarrelGun%2Fepg-mirror/packages?package_name=epg" \
+              | grep -o '"id":[0-9]*' | head -n 1 | cut -d':' -f2)
+
+            if [ -n "$PKG_ID" ]; then
+              echo "Deleting old package ID: $PKG_ID"
+              curl --request DELETE --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+                   "https://gitlab.com/api/v4/projects/BarrelGun%2Fepg-mirror/packages/$PKG_ID" || true
+            fi
           fi
 
           if [ "$EPG1_CHANGED" = "true" ] && [ -f epg.xml.gz ]; then
