@@ -44,25 +44,6 @@ jobs:
                  "https://gitlab.com/api/v4/projects/BarrelGun%2Fepg-mirror/packages/generic/epg/1.0.0/edem.xml.gz"
           fi
 
-      - name: Upload files to Yandex Disk (WebDAV)
-        env:
-          YANDEX_USER: ${{ secrets.YANDEX_USER }}
-          YANDEX_PASS: ${{ secrets.YANDEX_PASS }}
-        run: |
-          if [ -f epg.xml.gz ]; then
-            echo "Uploading epg.xml.gz to Yandex Disk..."
-            curl -f --retry 3 --user "$YANDEX_USER:$YANDEX_PASS" \
-                 -T epg.xml.gz \
-                 "https://webdav.yandex.ru/epg/epg.xml.gz"
-          fi
-
-          if [ -f edem.xml.gz ]; then
-            echo "Uploading edem.xml.gz to Yandex Disk..."
-            curl -f --retry 3 --user "$YANDEX_USER:$YANDEX_PASS" \
-                 -T edem.xml.gz \
-                 "https://webdav.yandex.ru/epg/edem.xml.gz"
-          fi
-
       - name: Commit state changes
         run: |
           git config --local user.email "action@github.com"
