@@ -2,8 +2,8 @@ name: Update EPG Mirror
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # Запуск каждые 6 часов
-  workflow_dispatch: # Возможность ручного запуска
+    - cron: '0 */6 * * *' # Автозапуск каждые 6 часов
+  workflow_dispatch: # Возможность ручного запуска из интерфейса GitHub
 
 jobs:
   update-epg:
@@ -52,14 +52,14 @@ jobs:
         run: |
           if [ "$EPG1_CHANGED" = "true" ] && [ -f epg.xml.gz ]; then
             echo "Uploading epg.xml.gz to GitLab..."
-            curl --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+            curl -f --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
                  --upload-file epg.xml.gz \
                  "https://gitlab.com/api/v4/projects/BarrelGun%2Fepg-mirror/packages/generic/epg/1.0.0/epg.xml.gz"
           fi
 
           if [ "$EPG2_CHANGED" = "true" ] && [ -f edem.xml.gz ]; then
             echo "Uploading edem.xml.gz to GitLab..."
-            curl --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+            curl -f --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
                  --upload-file edem.xml.gz \
                  "https://gitlab.com/api/v4/projects/BarrelGun%2Fepg-mirror/packages/generic/epg/1.0.0/edem.xml.gz"
           fi
@@ -71,16 +71,16 @@ jobs:
         run: |
           if [ "$EPG1_CHANGED" = "true" ] && [ -f epg.xml.gz ]; then
             echo "Uploading epg.xml.gz to Yandex Disk..."
-            curl --user "$YANDEX_USER:$YANDEX_PASS" \
+            curl -f --retry 3 --user "$YANDEX_USER:$YANDEX_PASS" \
                  -T epg.xml.gz \
-                 "https://webdav.yandex.ru/EPG/epg.xml.gz"
+                 "https://webdav.yandex.ru/epg/epg.xml.gz"
           fi
 
           if [ "$EPG2_CHANGED" = "true" ] && [ -f edem.xml.gz ]; then
             echo "Uploading edem.xml.gz to Yandex Disk..."
-            curl --user "$YANDEX_USER:$YANDEX_PASS" \
+            curl -f --retry 3 --user "$YANDEX_USER:$YANDEX_PASS" \
                  -T edem.xml.gz \
-                 "https://webdav.yandex.ru/EPG/edem.xml.gz"
+                 "https://webdav.yandex.ru/epg/edem.xml.gz"
           fi
 
       - name: Commit state changes
