@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '0 */6 * * *'
   workflow_dispatch:
+    inputs:
+      force_update:
+        description: 'Принудительно обновить EPG (игнорировать проверку размера)'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   update-epg:
@@ -15,13 +21,14 @@ jobs:
       - name: Check and download EPG 1 (epg.xml.gz)
         id: check_epg1
         run: |
-          NEW_LEN=$(curl -sI https://iptvx.one/epg/epg.xml.gz | grep -i Content-Length | awk '{print $2}' | tr -d '\r')
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          NEW_LEN=$(curl -sI -H "User-Agent: $UA" https://iptvx.one/epg/epg.xml.gz | grep -i Content-Length | awk '{print $2}' | tr -d '\r')
           OLD_LEN=""
           [ -f epg1_len.txt ] && OLD_LEN=$(cat epg1_len.txt)
           
-          if [ -n "$NEW_LEN" ] && [ "$NEW_LEN" != "$OLD_LEN" ]; then
-            echo "EPG1 changed ($OLD_LEN -> $NEW_LEN). Downloading..."
-            curl -s -o /tmp/epg.xml.gz https://iptvx.one/epg/epg.xml.gz
+          if [ "${{ inputs.force_update }}" = "true" ] || ([ -n "$NEW_LEN" ] && [ "$NEW_LEN" != "$OLD_LEN" ]); then
+            echo "EPG1 changed or force requested. Downloading..."
+            curl -s -H "User-Agent: $UA" -o /tmp/epg.xml.gz https://iptvx.one/epg/epg.xml.gz
             echo "$NEW_LEN" > epg1_len.txt
             echo "EPG1_CHANGED=true" >> $GITHUB_ENV
           else
@@ -32,13 +39,14 @@ jobs:
       - name: Check and download EPG 2 (edem.xml.gz)
         id: check_epg2
         run: |
-          NEW_LEN=$(curl -sI https://epg.one/edem.xml.gz | grep -i Content-Length | awk '{print $2}' | tr -d '\r')
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          NEW_LEN=$(curl -sI -H "User-Agent: $UA" https://epg.one/edem.xml.gz | grep -i Content-Length | awk '{print $2}' | tr -d '\r')
           OLD_LEN=""
           [ -f epg2_len.txt ] && OLD_LEN=$(cat epg2_len.txt)
           
-          if [ -n "$NEW_LEN" ] && [ "$NEW_LEN" != "$OLD_LEN" ]; then
-            echo "EPG2 changed ($OLD_LEN -> $NEW_LEN). Downloading..."
-            curl -s -o /tmp/edem.xml.gz https://epg.one/edem.xml.gz
+          if [ "${{ inputs.force_update }}" = "true" ] || ([ -n "$NEW_LEN" ] && [ "$NEW_LEN" != "$OLD_LEN" ]); then
+            echo "EPG2 changed or force requested. Downloading..."
+            curl -s -H "User-Agent: $UA" -o /tmp/edem.xml.gz https://epg.one/edem.xml.gz
             echo "$NEW_LEN" > epg2_len.txt
             echo "EPG2_CHANGED=true" >> $GITHUB_ENV
           else
@@ -79,10 +87,16 @@ jobs:
 
       - name: Commit state changes
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          # Удаляем случайно попавшие ранее xml файлы из индекса git, если они там есть
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
           git rm -f epg.xml.gz edem.xml.gz 2>/dev/null || true
           git add epg1_len.txt epg2_len.txt
-          git diff --quiet && git diff --staged --quiet || git commit -m "Update EPG metadata [skip ci]"
+          
+          if git diff --quiet --exit-code HEAD; then
+            echo "No changes in metadata to commit."
+            exit 0
+          fi
+
+          git commit -m "Auto-update EPG metadata: $(date -u +'%Y-%m-%d %H:%M') [skip ci]"
           git push
