@@ -1,4 +1,49 @@
-- name: Check and download EPG 2 (edem.xml.gz)
+name: Update EPG Mirror
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_update:
+        description: 'Принудительно обновить EPG (игнорировать проверку размера)'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  update-epg:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check and download EPG 1 (epg.xml.gz)
+        id: check_epg1
+        run: |
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          NEW_LEN=$(curl -sLI -H "User-Agent: $UA" https://iptvx.one/epg/epg.xml.gz | grep -i Content-Length | tail -n1 | awk '{print $2}' | tr -d '\r')
+          OLD_LEN=""
+          [ -f epg1_len.txt ] && OLD_LEN=$(cat epg1_len.txt)
+          
+          if [ "${{ inputs.force_update }}" = "true" ] || ([ -n "$NEW_LEN" ] && [ "$NEW_LEN" != "$OLD_LEN" ]); then
+            echo "EPG1 changed or force requested. Downloading..."
+            curl -sL -H "User-Agent: $UA" -o /tmp/epg.xml.gz https://iptvx.one/epg/epg.xml.gz
+            
+            FILE_SIZE=$(wc -c < /tmp/epg.xml.gz)
+            if [ "$FILE_SIZE" -gt 10000 ]; then
+              echo "$NEW_LEN" > epg1_len.txt
+              echo "EPG1_CHANGED=true" >> $GITHUB_ENV
+            else
+              echo "Error: EPG1 file is too small ($FILE_SIZE bytes). Skipping."
+              echo "EPG1_CHANGED=false" >> $GITHUB_ENV
+            fi
+          else
+            echo "EPG1 not changed."
+            echo "EPG1_CHANGED=false" >> $GITHUB_ENV
+          fi
+
+      - name: Check and download EPG 2 (edem.xml.gz)
         id: check_epg2
         run: |
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -8,19 +53,64 @@
           
           if [ "${{ inputs.force_update }}" = "true" ] || ([ -n "$NEW_LEN" ] && [ "$NEW_LEN" != "$OLD_LEN" ]); then
             echo "EPG2 changed or force requested. Downloading..."
-            # Добавлен ключ -L для перехода по редиректам
             curl -sL -H "User-Agent: $UA" -o /tmp/edem.xml.gz https://epg.one/edem.xml.gz
             
-            # Проверяем, что файл действительно скачался большим (больше 10 КБ), а не превратился в заглушку 145 байт
             FILE_SIZE=$(wc -c < /tmp/edem.xml.gz)
             if [ "$FILE_SIZE" -gt 10000 ]; then
               echo "$NEW_LEN" > epg2_len.txt
               echo "EPG2_CHANGED=true" >> $GITHUB_ENV
             else
-              echo "Error: Downloaded file is too small ($FILE_SIZE bytes). Skipping update."
+              echo "Error: EPG2 file is too small ($FILE_SIZE bytes). Skipping."
               echo "EPG2_CHANGED=false" >> $GITHUB_ENV
             fi
           else
             echo "EPG2 not changed."
             echo "EPG2_CHANGED=false" >> $GITHUB_ENV
           fi
+
+      - name: Upload files to GitLab Generic Packages
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          if [ "$EPG1_CHANGED" = "true" ] || [ "$EPG2_CHANGED" = "true" ]; then
+            echo "Finding existing package ID on GitLab..."
+            PKG_ID=$(curl -s --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+              "https://gitlab.com/api/v4/projects/BarrelGun%2Fepg-mirror/packages?package_name=epg" \
+              | grep -o '"id":[0-9]*' | head -n 1 | cut -d':' -f2)
+
+            if [ -n "$PKG_ID" ]; then
+              echo "Deleting old package ID: $PKG_ID"
+              curl --request DELETE --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+                   "https://gitlab.com/api/v4/projects/BarrelGun%2Fepg-mirror/packages/$PKG_ID" || true
+            fi
+          fi
+
+          if [ "$EPG1_CHANGED" = "true" ] && [ -f /tmp/epg.xml.gz ]; then
+            echo "Uploading epg.xml.gz to GitLab..."
+            curl -f --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+                 --upload-file /tmp/epg.xml.gz \
+                 "https://gitlab.com/api/v4/projects/BarrelGun%2Fepg-mirror/packages/generic/epg/1.0.0/epg.xml.gz"
+          fi
+
+          if [ "$EPG2_CHANGED" = "true" ] && [ -f /tmp/edem.xml.gz ]; then
+            echo "Uploading edem.xml.gz to GitLab..."
+            curl -f --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+                 --upload-file /tmp/edem.xml.gz \
+                 "https://gitlab.com/api/v4/projects/BarrelGun%2Fepg-mirror/packages/generic/epg/1.0.0/edem.xml.gz"
+          fi
+
+      - name: Commit state changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git rm -f epg.xml.gz edem.xml.gz 2>/dev/null || true
+          git add epg1_len.txt epg2_len.txt
+          
+          if git diff --quiet --exit-code HEAD; then
+            echo "No changes in metadata to commit."
+            exit 0
+          fi
+
+          git commit -m "Auto-update EPG metadata: $(date -u +'%Y-%m-%d %H:%M') [skip ci]"
+          git push
