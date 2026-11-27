@@ -1,3 +1,4 @@
+
 name: Update EPG Mirror
 
 on:
@@ -6,111 +7,269 @@ on:
   workflow_dispatch:
     inputs:
       force_update:
-        description: 'Принудительно обновить EPG (игнорировать проверку размера)'
+        description: 'Принудительно обновить EPG'
         required: false
         type: boolean
         default: false
 
+permissions:
+  contents: write
+
+concurrency:
+  group: update-epg-mirror
+  cancel-in-progress: false
+
 jobs:
   update-epg:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check and download EPG 1 (epg.xml.gz)
-        id: check_epg1
+      # Скачиваем и проверяем каждый источник независимо.
+      - name: Download and validate EPG files
+        id: download
+        shell: bash
         run: |
-          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-          NEW_LEN=$(curl -sLI -H "User-Agent: $UA" https://iptvx.one/epg/epg.xml.gz | grep -i Content-Length | tail -n1 | awk '{print $2}' | tr -d '\r')
-          OLD_LEN=""
-          [ -f epg1_len.txt ] && OLD_LEN=$(cat epg1_len.txt)
-          
-          if [ "${{ inputs.force_update }}" = "true" ] || ([ -n "$NEW_LEN" ] && [ "$NEW_LEN" != "$OLD_LEN" ]); then
-            echo "EPG1 changed or force requested. Downloading..."
-            curl -sL -H "User-Agent: $UA" -o /tmp/epg.xml.gz https://iptvx.one/epg/epg.xml.gz
-            
-            FILE_SIZE=$(wc -c < /tmp/epg.xml.gz)
-            if [ "$FILE_SIZE" -gt 10000 ]; then
-              echo "$NEW_LEN" > epg1_len.txt
-              echo "EPG1_CHANGED=true" >> $GITHUB_ENV
-            else
-              echo "Error: EPG1 file is too small ($FILE_SIZE bytes). Skipping."
-              echo "EPG1_CHANGED=false" >> $GITHUB_ENV
+          set -u
+
+          mkdir -p "$RUNNER_TEMP/epg"
+
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+
+          download_one() {
+            local key="$1"
+            local filename="$2"
+            local url="$3"
+            local dest="$RUNNER_TEMP/epg/$filename"
+
+            echo "Checking $filename ..."
+
+            if ! curl --fail --location --silent --show-error \
+              --retry 3 --retry-all-errors \
+              --connect-timeout 20 --max-time 300 \
+              -A "$UA" "$url" -o "$dest"; then
+              echo "Download failed: $filename"
+              rm -f "$dest"
+              echo "${key}_ok=false" >> "$GITHUB_OUTPUT"
+              return
             fi
-          else
-            echo "EPG1 not changed."
-            echo "EPG1_CHANGED=false" >> $GITHUB_ENV
+
+            local size
+            size=$(wc -c < "$dest")
+
+            if [ "$size" -le 10000 ]; then
+              echo "File is too small: $size bytes"
+              rm -f "$dest"
+              echo "${key}_ok=false" >> "$GITHUB_OUTPUT"
+              return
+            fi
+
+            if ! gzip -t "$dest"; then
+              echo "Invalid gzip archive: $filename"
+              rm -f "$dest"
+              echo "${key}_ok=false" >> "$GITHUB_OUTPUT"
+              return
+            fi
+
+            if ! python3 -c \
+              'import gzip,re,sys; d=gzip.open(sys.argv[1],"rb").read(2097152); sys.exit(0 if re.search(rb"<tv(?:\s|>)",d) else 1)' \
+              "$dest"; then
+              echo "XMLTV <tv> element not found: $filename"
+              rm -f "$dest"
+              echo "${key}_ok=false" >> "$GITHUB_OUTPUT"
+              return
+            fi
+
+            local hash
+            hash=$(sha256sum "$dest" | awk '{print $1}')
+
+            echo "$filename downloaded: $size bytes"
+            echo "SHA256: $hash"
+
+            echo "${key}_ok=true" >> "$GITHUB_OUTPUT"
+            echo "${key}_sha=$hash" >> "$GITHUB_OUTPUT"
+          }
+
+          download_one epg1 epg.xml.gz \
+            https://iptvx.one/epg/epg.xml.gz
+
+          download_one epg2 edem.xml.gz \
+            http://epg.one/edem.xml.gz
+
+          if [ "$(grep -c '=true' "$GITHUB_OUTPUT" || true)" -eq 0 ]; then
+            echo "Neither EPG source produced a valid archive."
+            exit 1
           fi
 
-      - name: Check and download EPG 2 (edem.xml.gz)
-        id: check_epg2
-        run: |
-          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-          NEW_LEN=$(curl -sLI -H "User-Agent: $UA" https://epg.one/edem.xml.gz | grep -i Content-Length | tail -n1 | awk '{print $2}' | tr -d '\r')
-          OLD_LEN=""
-          [ -f epg2_len.txt ] && OLD_LEN=$(cat epg2_len.txt)
-          
-          if [ "${{ inputs.force_update }}" = "true" ] || ([ -n "$NEW_LEN" ] && [ "$NEW_LEN" != "$OLD_LEN" ]); then
-            echo "EPG2 changed or force requested. Downloading..."
-            curl -sL -H "User-Agent: $UA" -o /tmp/edem.xml.gz https://epg.one/edem.xml.gz
-            
-            FILE_SIZE=$(wc -c < /tmp/edem.xml.gz)
-            if [ "$FILE_SIZE" -gt 10000 ]; then
-              echo "$NEW_LEN" > epg2_len.txt
-              echo "EPG2_CHANGED=true" >> $GITHUB_ENV
-            else
-              echo "Error: EPG2 file is too small ($FILE_SIZE bytes). Skipping."
-              echo "EPG2_CHANGED=false" >> $GITHUB_ENV
-            fi
-          else
-            echo "EPG2 not changed."
-            echo "EPG2_CHANGED=false" >> $GITHUB_ENV
-          fi
-
-      - name: Upload files to GitLab Generic Packages
+      # Публикация в Cloud.ru.
+      - name: Publish to Cloud.ru Object Storage
+        if: steps.download.outputs.epg1_ok == 'true' || steps.download.outputs.epg2_ok == 'true'
         env:
-          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDRU_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDRU_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ru-central-1
+          AWS_EC2_METADATA_DISABLED: "true"
+          FORCE_UPDATE: ${{ github.event.inputs.force_update || 'false' }}
+        shell: bash
         run: |
-          if [ "$EPG1_CHANGED" = "true" ] || [ "$EPG2_CHANGED" = "true" ]; then
-            echo "Finding existing package ID on GitLab..."
-            PKG_ID=$(curl -s --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
-              "https://gitlab.com/api/v4/projects/BarrelGun%2Fepg-mirror/packages?package_name=epg" \
-              | grep -o '"id":[0-9]*' | head -n 1 | cut -d':' -f2)
+          set -u
 
-            if [ -n "$PKG_ID" ]; then
-              echo "Deleting old package ID: $PKG_ID"
-              curl --request DELETE --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
-                   "https://gitlab.com/api/v4/projects/BarrelGun%2Fepg-mirror/packages/$PKG_ID" || true
+          if ! command -v aws >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y awscli
+          fi
+
+          FAILED=0
+
+          publish_one() {
+            local filename="$1"
+            local hash="$2"
+            local local_file="$RUNNER_TEMP/epg/$filename"
+
+            echo "Checking Cloud.ru object: $filename"
+
+            local remote_hash
+            remote_hash=$(aws s3api head-object \
+              --endpoint-url https://s3.cloud.ru \
+              --bucket epg-mirror \
+              --key "$filename" \
+              --query 'Metadata.sha256' \
+              --output text 2>/dev/null || true)
+
+            if [ "$remote_hash" = "$hash" ] && [ "$FORCE_UPDATE" != "true" ]; then
+              echo "$filename is unchanged in Cloud.ru."
+              return
             fi
+
+            echo "Uploading $filename to Cloud.ru..."
+
+            if aws s3api put-object \
+              --endpoint-url https://s3.cloud.ru \
+              --bucket epg-mirror \
+              --key "$filename" \
+              --body "$local_file" \
+              --content-type application/gzip \
+              --cache-control "public, max-age=21600" \
+              --metadata "sha256=$hash"; then
+              echo "$filename uploaded successfully."
+            else
+              echo "ERROR uploading $filename to Cloud.ru."
+              FAILED=1
+            fi
+          }
+
+          if [ "${{ steps.download.outputs.epg1_ok }}" = "true" ]; then
+            publish_one epg.xml.gz "${{ steps.download.outputs.epg1_sha }}"
           fi
 
-          if [ "$EPG1_CHANGED" = "true" ] && [ -f /tmp/epg.xml.gz ]; then
-            echo "Uploading epg.xml.gz to GitLab..."
-            curl -f --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
-                 --upload-file /tmp/epg.xml.gz \
-                 "https://gitlab.com/api/v4/projects/BarrelGun%2Fepg-mirror/packages/generic/epg/1.0.0/epg.xml.gz"
+          if [ "${{ steps.download.outputs.epg2_ok }}" = "true" ]; then
+            publish_one edem.xml.gz "${{ steps.download.outputs.epg2_sha }}"
           fi
 
-          if [ "$EPG2_CHANGED" = "true" ] && [ -f /tmp/edem.xml.gz ]; then
-            echo "Uploading edem.xml.gz to GitLab..."
-            curl -f --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
-                 --upload-file /tmp/edem.xml.gz \
-                 "https://gitlab.com/api/v4/projects/BarrelGun%2Fepg-mirror/packages/generic/epg/1.0.0/edem.xml.gz"
-          fi
+          exit "$FAILED"
 
-      - name: Commit state changes
+      # Публикация в GitHub отдельной веткой без накопления истории.
+      - name: Publish to GitHub mirror
+        if: always() && steps.download.outcome == 'success'
+        env:
+          FORCE_UPDATE: ${{ github.event.inputs.force_update || 'false' }}
+        shell: bash
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          git rm -f epg.xml.gz edem.xml.gz 2>/dev/null || true
-          git add epg1_len.txt epg2_len.txt
-          
-          if git diff --quiet --exit-code HEAD; then
-            echo "No changes in metadata to commit."
+          set -euo pipefail
+
+          OLD="$RUNNER_TEMP/epg-old"
+          mkdir -p "$OLD"
+
+          # Получаем предыдущую версию ветки, если она существует.
+          git fetch origin \
+            "+refs/heads/epg-data:refs/remotes/origin/epg-data" \
+            || true
+
+          if git show-ref --verify --quiet refs/remotes/origin/epg-data; then
+            git archive origin/epg-data | tar -x -C "$OLD"
+          fi
+
+          CHANGED=0
+
+          update_one() {
+            local key="$1"
+            local filename="$2"
+            local hash="$3"
+            local source="$RUNNER_TEMP/epg/$filename"
+            local old_hash=""
+
+            if [ "${!key}" != "true" ]; then
+              echo "$filename unavailable; retaining previous GitHub copy."
+              return
+            fi
+
+            local size
+            size=$(wc -c < "$source")
+
+            # Ограничение GitHub на размер отдельного файла.
+            if [ "$size" -ge 99000000 ]; then
+              echo "WARNING: $filename exceeds the safe GitHub file-size limit."
+              return
+            fi
+
+            if [ -f "$OLD/SHA256SUMS" ]; then
+              old_hash=$(awk -v f="$filename" '$2 == f {print $1}' "$OLD/SHA256SUMS")
+            fi
+
+            if [ "$old_hash" = "$hash" ] && [ "$FORCE_UPDATE" != "true" ]; then
+              echo "$filename is unchanged in GitHub."
+              return
+            fi
+
+            cp "$source" "$OLD/$filename"
+            CHANGED=1
+            echo "$filename will be updated in GitHub."
+          }
+
+          EPG1_OK="${{ steps.download.outputs.epg1_ok }}"
+          EPG2_OK="${{ steps.download.outputs.epg2_ok }}"
+
+          update_one EPG1_OK epg.xml.gz \
+            "${{ steps.download.outputs.epg1_sha }}"
+
+          update_one EPG2_OK edem.xml.gz \
+            "${{ steps.download.outputs.epg2_sha }}"
+
+          # Пересоздаём контрольные суммы только для имеющихся файлов.
+          cd "$OLD"
+          : > SHA256SUMS
+
+          for file in epg.xml.gz edem.xml.gz; do
+            if [ -f "$file" ]; then
+              sha256sum "$file" >> SHA256SUMS
+            fi
+          done
+
+          if [ "$CHANGED" -eq 0 ] && \
+             git show-ref --verify --quiet refs/remotes/origin/epg-data; then
+            echo "No GitHub EPG changes."
             exit 0
           fi
 
-          git commit -m "Auto-update EPG metadata: $(date -u +'%Y-%m-%d %H:%M') [skip ci]"
-          git push
+          if [ ! -f epg.xml.gz ] && [ ! -f edem.xml.gz ]; then
+            echo "No valid EPG files available for GitHub."
+            exit 1
+          fi
+
+          cd "$GITHUB_WORKSPACE"
+
+          # Создаём новую независимую историю ветки epg-data.
+          git checkout --orphan epg-data
+          git clean -fdx
+
+          cp "$OLD"/* .
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+          git commit -m "Update EPG mirror: $(date -u +'%Y-%m-%d %H:%M UTC')"
+
+          git push --force origin HEAD:refs/heads/epg-data
