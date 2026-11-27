@@ -171,6 +171,7 @@ jobs:
           exit "$FAILED"
 
       # Публикация в GitHub отдельной веткой без накопления истории.
+     
       - name: Publish to GitHub mirror
         if: always() && steps.download.outcome == 'success'
         env:
@@ -182,33 +183,40 @@ jobs:
           OLD="$RUNNER_TEMP/epg-old"
           mkdir -p "$OLD"
 
-          # Получаем предыдущую версию ветки, если она существует.
-          git fetch origin \
-            "+refs/heads/epg-data:refs/remotes/origin/epg-data" \
-            || true
-
-          if git show-ref --verify --quiet refs/remotes/origin/epg-data; then
+          # Загружаем прежнюю версию ветки, если она существует.
+          if git ls-remote --exit-code origin refs/heads/epg-data >/dev/null 2>&1; then
+            git fetch origin \
+              "+refs/heads/epg-data:refs/remotes/origin/epg-data"
             git archive origin/epg-data | tar -x -C "$OLD"
           fi
 
+          # Удаляем из временной копии всё, кроме двух архивов и манифеста.
+          find "$OLD" -mindepth 1 -maxdepth 1 \
+            ! -name epg.xml.gz \
+            ! -name edem.xml.gz \
+            ! -name SHA256SUMS \
+            -exec rm -rf -- {} +
+
           CHANGED=0
 
+          EPG1_OK="${{ steps.download.outputs.epg1_ok }}"
+          EPG2_OK="${{ steps.download.outputs.epg2_ok }}"
+
           update_one() {
-            local key="$1"
+            local ok="$1"
             local filename="$2"
             local hash="$3"
             local source="$RUNNER_TEMP/epg/$filename"
             local old_hash=""
 
-            if [ "${!key}" != "true" ]; then
-              echo "$filename unavailable; retaining previous GitHub copy."
+            if [ "$ok" != "true" ]; then
+              echo "$filename unavailable; retaining previous copy."
               return
             fi
 
             local size
             size=$(wc -c < "$source")
 
-            # Ограничение GitHub на размер отдельного файла.
             if [ "$size" -ge 99000000 ]; then
               echo "WARNING: $filename exceeds the safe GitHub file-size limit."
               return
@@ -225,19 +233,21 @@ jobs:
 
             cp "$source" "$OLD/$filename"
             CHANGED=1
-            echo "$filename will be updated in GitHub."
+            echo "$filename will be updated."
           }
 
-          EPG1_OK="${{ steps.download.outputs.epg1_ok }}"
-          EPG2_OK="${{ steps.download.outputs.epg2_ok }}"
-
-          update_one EPG1_OK epg.xml.gz \
+          update_one "$EPG1_OK" epg.xml.gz \
             "${{ steps.download.outputs.epg1_sha }}"
 
-          update_one EPG2_OK edem.xml.gz \
+          update_one "$EPG2_OK" edem.xml.gz \
             "${{ steps.download.outputs.epg2_sha }}"
 
-          # Пересоздаём контрольные суммы только для имеющихся файлов.
+          if [ ! -f "$OLD/epg.xml.gz" ] && [ ! -f "$OLD/edem.xml.gz" ]; then
+            echo "No valid EPG files available for GitHub."
+            exit 1
+          fi
+
+          # Создаём новый манифест только для имеющихся архивов.
           cd "$OLD"
           : > SHA256SUMS
 
@@ -253,23 +263,26 @@ jobs:
             exit 0
           fi
 
-          if [ ! -f epg.xml.gz ] && [ ! -f edem.xml.gz ]; then
-            echo "No valid EPG files available for GitHub."
-            exit 1
-          fi
-
           cd "$GITHUB_WORKSPACE"
 
-          # Создаём новую независимую историю ветки epg-data.
           git checkout --orphan epg-data
-          git clean -fdx
 
-          cp "$OLD"/* .
+          # Полностью очищаем рабочую папку, сохраняя .git.
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 \
+            ! -name .git \
+            -exec rm -rf -- {} +
+
+          cp "$OLD/epg.xml.gz" "$OLD/SHA256SUMS" .
+          [ ! -f "$OLD/edem.xml.gz" ] || cp "$OLD/edem.xml.gz" .
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add -A
-          git commit -m "Update EPG mirror: $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git add epg.xml.gz edem.xml.gz SHA256SUMS 2>/dev/null || true
+          git add -f SHA256SUMS
 
+          echo "Files to publish:"
+          git ls-files
+
+          git commit -m "Update EPG mirror: $(date -u +'%Y-%m-%d %H:%M UTC')"
           git push --force origin HEAD:refs/heads/epg-data
