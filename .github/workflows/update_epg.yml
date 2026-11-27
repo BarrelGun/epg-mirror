@@ -283,14 +283,14 @@ jobs:
 
           # Удаляем все файлы рабочей папки, кроме .git.
           find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 \
-          ! -name .git \
-          -exec rm -rf -- {} +
+            ! -name .git \
+            -exec rm -rf -- {} +
 
           # Копируем только два архива и контрольные суммы.
           for file in epg.xml.gz edem.xml.gz SHA256SUMS; do
-          if [ -f "$OLD/$file" ]; then
-          cp "$OLD/$file" "$GITHUB_WORKSPACE/$file"
-          fi
+            if [ -f "$OLD/$file" ]; then
+              cp "$OLD/$file" "$GITHUB_WORKSPACE/$file"
+            fi
           done
 
           git config user.name "github-actions[bot]"
