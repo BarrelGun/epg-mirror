@@ -27,8 +27,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Скачиваем и проверяем каждый источник независимо.
-      - name: Download and validate EPG files
+      # Скачиваем и проверяем единственный источник EPG.
+      - name: Download and validate EPG file
         id: download
         shell: bash
         run: |
@@ -38,74 +38,51 @@ jobs:
 
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
 
-          download_one() {
-            local key="$1"
-            local filename="$2"
-            local url="$3"
-            local dest="$RUNNER_TEMP/epg/$filename"
+          filename="epg.xml.gz"
+          url="https://iptvx.one/epg/epg.xml.gz"
+          dest="$RUNNER_TEMP/epg/$filename"
 
-            echo "Checking $filename ..."
+          echo "Checking $filename ..."
 
-            if ! curl --fail --location --silent --show-error \
-              --retry 3 --retry-all-errors \
-              --connect-timeout 20 --max-time 300 \
-              -A "$UA" "$url" -o "$dest"; then
-              echo "Download failed: $filename"
-              rm -f "$dest"
-              echo "${key}_ok=false" >> "$GITHUB_OUTPUT"
-              return
-            fi
-
-            local size
-            size=$(wc -c < "$dest")
-
-            if [ "$size" -le 10000 ]; then
-              echo "File is too small: $size bytes"
-              rm -f "$dest"
-              echo "${key}_ok=false" >> "$GITHUB_OUTPUT"
-              return
-            fi
-
-            if ! gzip -t "$dest"; then
-              echo "Invalid gzip archive: $filename"
-              rm -f "$dest"
-              echo "${key}_ok=false" >> "$GITHUB_OUTPUT"
-              return
-            fi
-
-            if ! python3 -c \
-              'import gzip,re,sys; d=gzip.open(sys.argv[1],"rb").read(2097152); sys.exit(0 if re.search(rb"<tv(?:\s|>)",d) else 1)' \
-              "$dest"; then
-              echo "XMLTV <tv> element not found: $filename"
-              rm -f "$dest"
-              echo "${key}_ok=false" >> "$GITHUB_OUTPUT"
-              return
-            fi
-
-            local hash
-            hash=$(sha256sum "$dest" | awk '{print $1}')
-
-            echo "$filename downloaded: $size bytes"
-            echo "SHA256: $hash"
-
-            echo "${key}_ok=true" >> "$GITHUB_OUTPUT"
-            echo "${key}_sha=$hash" >> "$GITHUB_OUTPUT"
-          }
-
-          download_one epg1 epg.xml.gz \
-            https://iptvx.one/epg/epg.xml.gz
-
-          download_one epg2 edem.xml.gz \
-            http://epg.one/edem.xml.gz
-
-          if [ "$(grep -c '=true' "$GITHUB_OUTPUT" || true)" -eq 0 ]; then
-            echo "Neither EPG source produced a valid archive."
+          if ! curl --fail --location --silent --show-error \
+            --retry 3 --retry-all-errors \
+            --connect-timeout 20 --max-time 300 \
+            -A "$UA" "$url" -o "$dest"; then
+            echo "Download failed: $filename"
+            rm -f "$dest"
             exit 1
           fi
 
+          size=$(wc -c < "$dest")
+
+          if [ "$size" -le 10000 ]; then
+            echo "File is too small: $size bytes"
+            exit 1
+          fi
+
+          if ! gzip -t "$dest"; then
+            echo "Invalid gzip archive: $filename"
+            exit 1
+          fi
+
+          if ! python3 -c \
+            'import gzip,re,sys; d=gzip.open(sys.argv[1],"rb").read(2097152); sys.exit(0 if re.search(rb"<tv(?:\s|>)",d) else 1)' \
+            "$dest"; then
+            echo "XMLTV <tv> element not found: $filename"
+            exit 1
+          fi
+
+          hash=$(sha256sum "$dest" | awk '{print $1}')
+
+          echo "$filename downloaded: $size bytes"
+          echo "SHA256: $hash"
+
+          echo "epg1_ok=true" >> "$GITHUB_OUTPUT"
+          echo "epg1_sha=$hash" >> "$GITHUB_OUTPUT"
+
       # Публикация в Cloud.ru.
       - name: Publish to Cloud.ru Object Storage
-        if: steps.download.outputs.epg1_ok == 'true' || steps.download.outputs.epg2_ok == 'true'
+        if: steps.download.outputs.epg1_ok == 'true'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDRU_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDRU_SECRET_ACCESS_KEY }}
@@ -121,58 +98,38 @@ jobs:
             sudo apt-get install -y awscli
           fi
 
-          FAILED=0
+          filename="epg.xml.gz"
+          hash="${{ steps.download.outputs.epg1_sha }}"
+          local_file="$RUNNER_TEMP/epg/$filename"
 
-          publish_one() {
-            local filename="$1"
-            local hash="$2"
-            local local_file="$RUNNER_TEMP/epg/$filename"
+          echo "Checking Cloud.ru object: $filename"
 
-            echo "Checking Cloud.ru object: $filename"
+          remote_hash=$(aws s3api head-object \
+            --endpoint-url https://s3.cloud.ru \
+            --bucket epg-mirror \
+            --key "$filename" \
+            --query 'Metadata.sha256' \
+            --output text 2>/dev/null || true)
 
-            local remote_hash
-            remote_hash=$(aws s3api head-object \
-              --endpoint-url https://s3.cloud.ru \
-              --bucket epg-mirror \
-              --key "$filename" \
-              --query 'Metadata.sha256' \
-              --output text 2>/dev/null || true)
-
-            if [ "$remote_hash" = "$hash" ] && [ "$FORCE_UPDATE" != "true" ]; then
-              echo "$filename is unchanged in Cloud.ru."
-              return
-            fi
-
-            echo "Uploading $filename to Cloud.ru..."
-
-            if aws s3api put-object \
-              --endpoint-url https://s3.cloud.ru \
-              --bucket epg-mirror \
-              --key "$filename" \
-              --body "$local_file" \
-              --content-type application/gzip \
-              --cache-control "public, max-age=21600" \
-              --metadata "sha256=$hash"; then
-              echo "$filename uploaded successfully."
-            else
-              echo "ERROR uploading $filename to Cloud.ru."
-              FAILED=1
-            fi
-          }
-
-          if [ "${{ steps.download.outputs.epg1_ok }}" = "true" ]; then
-            publish_one epg.xml.gz "${{ steps.download.outputs.epg1_sha }}"
+          if [ "$remote_hash" = "$hash" ] && [ "$FORCE_UPDATE" != "true" ]; then
+            echo "$filename is unchanged in Cloud.ru."
+            exit 0
           fi
 
-          if [ "${{ steps.download.outputs.epg2_ok }}" = "true" ]; then
-            publish_one edem.xml.gz "${{ steps.download.outputs.epg2_sha }}"
-          fi
+          echo "Uploading $filename to Cloud.ru..."
 
-          exit "$FAILED"
+          aws s3api put-object \
+            --endpoint-url https://s3.cloud.ru \
+            --bucket epg-mirror \
+            --key "$filename" \
+            --body "$local_file" \
+            --content-type application/gzip \
+            --cache-control "public, max-age=21600" \
+            --metadata "sha256=$hash"
+
+          echo "$filename uploaded successfully."
 
       # Публикация в GitHub отдельной веткой без накопления истории.
-     
-
       - name: Publish to GitHub mirror
         if: always() && steps.download.outcome == 'success'
         env:
@@ -201,7 +158,7 @@ jobs:
           # Проверяем, нет ли посторонних файлов в старой ветке.
           if [ "$HAS_OLD" = "true" ]; then
             EXTRA=$(git ls-tree -r --name-only origin/epg-data |
-              grep -Ev '^(epg.xml.gz|edem.xml.gz|SHA256SUMS)$' || true)
+              grep -Ev '^(epg.xml.gz|SHA256SUMS)$' || true)
 
             if [ -n "$EXTRA" ]; then
               echo "Unexpected files found in epg-data:"
@@ -211,64 +168,42 @@ jobs:
           fi
 
           EPG1_OK="${{ steps.download.outputs.epg1_ok }}"
-          EPG2_OK="${{ steps.download.outputs.epg2_ok }}"
 
-          update_one() {
-            local ok="$1"
-            local filename="$2"
-            local hash="$3"
-            local source="$RUNNER_TEMP/epg/$filename"
-            local old_hash=""
+          filename="epg.xml.gz"
+          source="$RUNNER_TEMP/epg/$filename"
+          hash="${{ steps.download.outputs.epg1_sha }}"
+          old_hash=""
 
-            if [ "$ok" != "true" ]; then
-              echo "$filename unavailable; retaining previous copy."
-              return
-            fi
-
-            local size
-            size=$(wc -c < "$source")
-
-            if [ "$size" -ge 99000000 ]; then
-              echo "WARNING: $filename exceeds the safe GitHub file-size limit."
-              return
-            fi
-
-            if [ -f "$OLD/SHA256SUMS" ]; then
-              old_hash=$(awk -v f="$filename" '$2 == f {print $1}' "$OLD/SHA256SUMS")
-            fi
-
-             if [ "$old_hash" = "$hash" ] && \
-              [ -f "$OLD/$filename" ] && \
-              [ "$FORCE_UPDATE" != "true" ]; then
-              echo "$filename is unchanged."
-              return
-            fi
-
-            cp "$source" "$OLD/$filename"
-            CHANGED=1
-            echo "$filename will be updated."
-          }
-
-          update_one "$EPG1_OK" epg.xml.gz \
-            "${{ steps.download.outputs.epg1_sha }}"
-
-          update_one "$EPG2_OK" edem.xml.gz \
-            "${{ steps.download.outputs.epg2_sha }}"
-
-          if [ ! -f "$OLD/epg.xml.gz" ] && [ ! -f "$OLD/edem.xml.gz" ]; then
-            echo "No valid EPG files available."
+          if [ "$EPG1_OK" != "true" ]; then
+            echo "$filename unavailable."
             exit 1
           fi
 
-          # Создаём манифест только для двух архивов.
+          size=$(wc -c < "$source")
+
+          if [ "$size" -ge 99000000 ]; then
+            echo "WARNING: $filename exceeds the safe GitHub file-size limit."
+            exit 1
+          fi
+
+          if [ -f "$OLD/SHA256SUMS" ]; then
+            old_hash=$(awk -v f="$filename" '$2 == f {print $1}' "$OLD/SHA256SUMS")
+          fi
+
+          if [ "$old_hash" = "$hash" ] && \
+            [ -f "$OLD/$filename" ] && \
+            [ "$FORCE_UPDATE" != "true" ]; then
+            echo "$filename is unchanged."
+          else
+            cp "$source" "$OLD/$filename"
+            CHANGED=1
+            echo "$filename will be updated."
+          fi
+
+          # Создаём манифест только для одного архива.
           cd "$OLD"
           : > SHA256SUMS
-
-          for file in epg.xml.gz edem.xml.gz; do
-            if [ -f "$file" ]; then
-              sha256sum "$file" >> SHA256SUMS
-            fi
-          done
+          sha256sum epg.xml.gz >> SHA256SUMS
 
           if [ "$FORCE_UPDATE" = "true" ]; then
             CHANGED=1
@@ -288,8 +223,8 @@ jobs:
             ! -name .git \
             -exec rm -rf -- {} +
 
-          # Копируем только два архива и контрольные суммы.
-          for file in epg.xml.gz edem.xml.gz SHA256SUMS; do
+          # Копируем только архив и контрольные суммы.
+          for file in epg.xml.gz SHA256SUMS; do
             if [ -f "$OLD/$file" ]; then
               cp "$OLD/$file" "$GITHUB_WORKSPACE/$file"
             fi
@@ -305,4 +240,3 @@ jobs:
 
           git commit -m "Update EPG mirror: $(date -u +'%Y-%m-%d %H:%M UTC')"
           git push --force origin HEAD:refs/heads/epg-data
-
