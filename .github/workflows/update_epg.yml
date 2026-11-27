@@ -172,6 +172,7 @@ jobs:
 
       # Публикация в GitHub отдельной веткой без накопления истории.
      
+
       - name: Publish to GitHub mirror
         if: always() && steps.download.outcome == 'success'
         env:
@@ -183,21 +184,31 @@ jobs:
           OLD="$RUNNER_TEMP/epg-old"
           mkdir -p "$OLD"
 
-          # Загружаем прежнюю версию ветки, если она существует.
+          CHANGED=0
+          HAS_OLD=false
+
+          # Получаем предыдущую ветку.
           if git ls-remote --exit-code origin refs/heads/epg-data >/dev/null 2>&1; then
             git fetch origin \
               "+refs/heads/epg-data:refs/remotes/origin/epg-data"
             git archive origin/epg-data | tar -x -C "$OLD"
+            HAS_OLD=true
+          else
+            echo "Branch epg-data does not exist yet."
+            CHANGED=1
           fi
 
-          # Удаляем из временной копии всё, кроме двух архивов и манифеста.
-          find "$OLD" -mindepth 1 -maxdepth 1 \
-            ! -name epg.xml.gz \
-            ! -name edem.xml.gz \
-            ! -name SHA256SUMS \
-            -exec rm -rf -- {} +
+          # Проверяем, нет ли посторонних файлов в старой ветке.
+          if [ "$HAS_OLD" = "true" ]; then
+            EXTRA=$(git ls-tree -r --name-only origin/epg-data |
+              grep -Ev '^(epg.xml.gz|edem.xml.gz|SHA256SUMS)$' || true)
 
-          CHANGED=0
+            if [ -n "$EXTRA" ]; then
+              echo "Unexpected files found in epg-data:"
+              echo "$EXTRA"
+              CHANGED=1
+            fi
+          fi
 
           EPG1_OK="${{ steps.download.outputs.epg1_ok }}"
           EPG2_OK="${{ steps.download.outputs.epg2_ok }}"
@@ -227,7 +238,7 @@ jobs:
             fi
 
             if [ "$old_hash" = "$hash" ] && [ "$FORCE_UPDATE" != "true" ]; then
-              echo "$filename is unchanged in GitHub."
+              echo "$filename is unchanged."
               return
             fi
 
@@ -243,11 +254,11 @@ jobs:
             "${{ steps.download.outputs.epg2_sha }}"
 
           if [ ! -f "$OLD/epg.xml.gz" ] && [ ! -f "$OLD/edem.xml.gz" ]; then
-            echo "No valid EPG files available for GitHub."
+            echo "No valid EPG files available."
             exit 1
           fi
 
-          # Создаём новый манифест только для имеющихся архивов.
+          # Создаём манифест только для двух архивов.
           cd "$OLD"
           : > SHA256SUMS
 
@@ -257,32 +268,35 @@ jobs:
             fi
           done
 
-          if [ "$CHANGED" -eq 0 ] && \
-             git show-ref --verify --quiet refs/remotes/origin/epg-data; then
-            echo "No GitHub EPG changes."
+          if [ "$FORCE_UPDATE" = "true" ]; then
+            CHANGED=1
+          fi
+
+          if [ "$CHANGED" -eq 0 ]; then
+            echo "No GitHub changes."
             exit 0
           fi
 
+          # Пересоздаём ветку с чистым содержимым.
           cd "$GITHUB_WORKSPACE"
-
           git checkout --orphan epg-data
 
-          # Полностью очищаем рабочую папку, сохраняя .git.
+          # Удаляем все файлы рабочей папки, кроме .git.
           find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 \
             ! -name .git \
             -exec rm -rf -- {} +
 
-          cp "$OLD/epg.xml.gz" "$OLD/SHA256SUMS" .
-          [ ! -f "$OLD/edem.xml.gz" ] || cp "$OLD/edem.xml.gz" .
+          # Копируем только разрешённые файлы.
+          cp -a "$OLD/." "$GITHUB_WORKSPACE/"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add epg.xml.gz edem.xml.gz SHA256SUMS 2>/dev/null || true
-          git add -f SHA256SUMS
+          git add -A
 
-          echo "Files to publish:"
+          echo "Files prepared for publication:"
           git ls-files
 
           git commit -m "Update EPG mirror: $(date -u +'%Y-%m-%d %H:%M UTC')"
           git push --force origin HEAD:refs/heads/epg-data
+
