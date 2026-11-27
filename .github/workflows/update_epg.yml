@@ -1,4 +1,4 @@
-
+```yaml
 name: Update EPG Mirror
 
 on:
@@ -80,6 +80,83 @@ jobs:
           echo "epg1_ok=true" >> "$GITHUB_OUTPUT"
           echo "epg1_sha=$hash" >> "$GITHUB_OUTPUT"
 
+          # ==========================================================
+          # EDEM ARCHIVE — ВТОРОЙ ИСТОЧНИК (ОТКЛЮЧЁН)
+          #
+          # Старый URL:
+          # http://epg.one/edem.xml.gz
+          #
+          # Имя файла:
+          # edem.xml.gz
+          #
+          # Ниже сохранена прежняя функция скачивания и проверки.
+          # Для восстановления EDEM необходимо вернуть функцию
+          # download_one и вызвать её для второго источника.
+          # ==========================================================
+
+          # download_one() {
+          #   local key="$1"
+          #   local filename="$2"
+          #   local url="$3"
+          #   local dest="$RUNNER_TEMP/epg/$filename"
+          #
+          #   echo "Checking $filename ..."
+          #
+          #   if ! curl --fail --location --silent --show-error \
+          #     --retry 3 --retry-all-errors \
+          #     --connect-timeout 20 --max-time 300 \
+          #     -A "$UA" "$url" -o "$dest"; then
+          #     echo "Download failed: $filename"
+          #     rm -f "$dest"
+          #     echo "${key}_ok=false" >> "$GITHUB_OUTPUT"
+          #     return
+          #   fi
+          #
+          #   local size
+          #   size=$(wc -c < "$dest")
+          #
+          #   if [ "$size" -le 10000 ]; then
+          #     echo "File is too small: $size bytes"
+          #     rm -f "$dest"
+          #     echo "${key}_ok=false" >> "$GITHUB_OUTPUT"
+          #     return
+          #   fi
+          #
+          #   if ! gzip -t "$dest"; then
+          #     echo "Invalid gzip archive: $filename"
+          #     rm -f "$dest"
+          #     echo "${key}_ok=false" >> "$GITHUB_OUTPUT"
+          #     return
+          #   fi
+          #
+          #   if ! python3 -c \
+          #     'import gzip,re,sys; d=gzip.open(sys.argv[1],"rb").read(2097152); sys.exit(0 if re.search(rb"<tv(?:\s|>)",d) else 1)' \
+          #     "$dest"; then
+          #     echo "XMLTV <tv> element not found: $filename"
+          #     rm -f "$dest"
+          #     echo "${key}_ok=false" >> "$GITHUB_OUTPUT"
+          #     return
+          #   fi
+          #
+          #   local hash
+          #   hash=$(sha256sum "$dest" | awk '{print $1}')
+          #
+          #   echo "$filename downloaded: $size bytes"
+          #   echo "SHA256: $hash"
+          #
+          #   echo "${key}_ok=true" >> "$GITHUB_OUTPUT"
+          #   echo "${key}_sha=$hash" >> "$GITHUB_OUTPUT"
+          # }
+          #
+          # Старый вызов второго источника:
+          #
+          # download_one epg2 edem.xml.gz \
+          #   http://epg.one/edem.xml.gz
+          #
+          # При восстановлении двух источников также нужно вернуть
+          # проверку, что хотя бы один источник скачан успешно.
+          # ==========================================================
+
       # Публикация в Cloud.ru.
       - name: Publish to Cloud.ru Object Storage
         if: steps.download.outputs.epg1_ok == 'true'
@@ -128,6 +205,65 @@ jobs:
             --metadata "sha256=$hash"
 
           echo "$filename uploaded successfully."
+
+          # ==========================================================
+          # EDEM ARCHIVE — ПУБЛИКАЦИЯ В CLOUD.RU (ОТКЛЮЧЕНА)
+          #
+          # Старое имя объекта: edem.xml.gz
+          # Bucket: epg-mirror
+          # Endpoint: https://s3.cloud.ru
+          #
+          # Сохранена прежняя функция публикации.
+          # Для восстановления необходимо вернуть функцию и вызов
+          # publish_one для EDEM.
+          # ==========================================================
+
+          # publish_one() {
+          #   local filename="$1"
+          #   local hash="$2"
+          #   local local_file="$RUNNER_TEMP/epg/$filename"
+          #
+          #   echo "Checking Cloud.ru object: $filename"
+          #
+          #   local remote_hash
+          #   remote_hash=$(aws s3api head-object \
+          #     --endpoint-url https://s3.cloud.ru \
+          #     --bucket epg-mirror \
+          #     --key "$filename" \
+          #     --query 'Metadata.sha256' \
+          #     --output text 2>/dev/null || true)
+          #
+          #   if [ "$remote_hash" = "$hash" ] && [ "$FORCE_UPDATE" != "true" ]; then
+          #     echo "$filename is unchanged in Cloud.ru."
+          #     return
+          #   fi
+          #
+          #   echo "Uploading $filename to Cloud.ru..."
+          #
+          #   if aws s3api put-object \
+          #     --endpoint-url https://s3.cloud.ru \
+          #     --bucket epg-mirror \
+          #     --key "$filename" \
+          #     --body "$local_file" \
+          #     --content-type application/gzip \
+          #     --cache-control "public, max-age=21600" \
+          #     --metadata "sha256=$hash"; then
+          #     echo "$filename uploaded successfully."
+          #   else
+          #     echo "ERROR uploading $filename to Cloud.ru."
+          #     FAILED=1
+          #   fi
+          # }
+          #
+          # Старый вызов второго источника:
+          #
+          # if [ "${{ steps.download.outputs.epg2_ok }}" = "true" ]; then
+          #   publish_one edem.xml.gz "${{ steps.download.outputs.epg2_sha }}"
+          # fi
+          #
+          # В прежней реализации также использовалась переменная FAILED
+          # для контроля ошибок публикации обоих объектов.
+          # ==========================================================
 
       # Публикация в GitHub отдельной веткой без накопления истории.
       - name: Publish to GitHub mirror
@@ -240,3 +376,84 @@ jobs:
 
           git commit -m "Update EPG mirror: $(date -u +'%Y-%m-%d %H:%M UTC')"
           git push --force origin HEAD:refs/heads/epg-data
+
+          # ==========================================================
+          # EDEM ARCHIVE — ПУБЛИКАЦИЯ В GITHUB (ОТКЛЮЧЕНА)
+          #
+          # Старый файл: edem.xml.gz
+          #
+          # Ниже сохранены ключевые фрагменты прежней двухисточниковой
+          # реализации GitHub-публикации.
+          # ==========================================================
+
+          # EPG2_OK="${{ steps.download.outputs.epg2_ok }}"
+          #
+          # update_one() {
+          #   local ok="$1"
+          #   local filename="$2"
+          #   local hash="$3"
+          #   local source="$RUNNER_TEMP/epg/$filename"
+          #   local old_hash=""
+          #
+          #   if [ "$ok" != "true" ]; then
+          #     echo "$filename unavailable; retaining previous copy."
+          #     return
+          #   fi
+          #
+          #   local size
+          #   size=$(wc -c < "$source")
+          #
+          #   if [ "$size" -ge 99000000 ]; then
+          #     echo "WARNING: $filename exceeds the safe GitHub file-size limit."
+          #     return
+          #   fi
+          #
+          #   if [ -f "$OLD/SHA256SUMS" ]; then
+          #     old_hash=$(awk -v f="$filename" '$2 == f {print $1}' "$OLD/SHA256SUMS")
+          #   fi
+          #
+          #   if [ "$old_hash" = "$hash" ] && [ "$FORCE_UPDATE" != "true" ]; then
+          #     echo "$filename is unchanged."
+          #     return
+          #   fi
+          #
+          #   cp "$source" "$OLD/$filename"
+          #   CHANGED=1
+          #   echo "$filename will be updated."
+          # }
+          #
+          # Старый вызов обновления EDEM:
+          #
+          # update_one "$EPG2_OK" edem.xml.gz \
+          #   "${{ steps.download.outputs.epg2_sha }}"
+          #
+          # В старой версии проверялись оба архива:
+          #
+          # if [ ! -f "$OLD/epg.xml.gz" ] && [ ! -f "$OLD/edem.xml.gz" ]; then
+          #   echo "No valid EPG files available."
+          #   exit 1
+          # fi
+          #
+          # Старое формирование SHA256SUMS для двух файлов:
+          #
+          # cd "$OLD"
+          # : > SHA256SUMS
+          #
+          # for file in epg.xml.gz edem.xml.gz; do
+          #   if [ -f "$file" ]; then
+          #     sha256sum "$file" >> SHA256SUMS
+          #   fi
+          # done
+          #
+          # В старой версии также разрешалось наличие обоих файлов
+          # при проверке содержимого ветки:
+          #
+          # EXTRA=$(git ls-tree -r --name-only origin/epg-data |
+          #   grep -Ev '^(epg.xml.gz|edem.xml.gz|SHA256SUMS)$' || true)
+          #
+          # При публикации копировалось всё содержимое OLD:
+          #
+          # cp -a "$OLD/." "$GITHUB_WORKSPACE/"
+          #
+          # ==========================================================
+```
