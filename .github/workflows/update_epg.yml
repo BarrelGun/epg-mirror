@@ -286,8 +286,12 @@ jobs:
             ! -name .git \
             -exec rm -rf -- {} +
 
-          # Копируем только разрешённые файлы.
-          cp -a "$OLD/." "$GITHUB_WORKSPACE/"
+           # Копируем только два архива и контрольные суммы.
+          for file in epg.xml.gz edem.xml.gz SHA256SUMS; do
+          if [ -f "$OLD/$file" ]; then
+          cp "$OLD/$file" "$GITHUB_WORKSPACE/$file"
+          fi
+          done
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
