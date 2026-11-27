@@ -237,7 +237,9 @@ jobs:
               old_hash=$(awk -v f="$filename" '$2 == f {print $1}' "$OLD/SHA256SUMS")
             fi
 
-            if [ "$old_hash" = "$hash" ] && [ "$FORCE_UPDATE" != "true" ]; then
+             if [ "$old_hash" = "$hash" ] && \
+              [ -f "$OLD/$filename" ] && \
+              [ "$FORCE_UPDATE" != "true" ]; then
               echo "$filename is unchanged."
               return
             fi
